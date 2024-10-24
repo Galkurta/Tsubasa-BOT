@@ -705,7 +705,7 @@ class TsubasaAPI {
 
     while (true) {
       try {
-        // Get current energy status
+        // Get fresh energy status
         const startResult = await this.callStartAPI(initData, axiosInstance);
         if (!startResult.success) {
           logger.error("Failed to get energy status");
@@ -714,17 +714,26 @@ class TsubasaAPI {
 
         const currentEnergy = startResult.energy;
         const maxEnergy = startResult.max_energy;
-        const multiTapCount = startResult.multi_tap_count || 12;
+        const multiTapCount = startResult.multi_tap_count;
 
-        // If not enough energy for even one tap
+        if (!multiTapCount) {
+          logger.error("Multi tap count not available");
+          break;
+        }
+
+        // If not enough energy for tap
         if (currentEnergy < multiTapCount) {
-          logger.info("Not enough energy for tap, attempting recovery...");
+          logger.info(
+            `Energy below required amount (${currentEnergy}/${multiTapCount}), attempting recovery...`
+          );
           const recoveryResult = await this.callEnergyRecoveryAPI(
             initData,
             axiosInstance
           );
           if (recoveryResult.success) {
-            logger.info(`Energy recovered to ${recoveryResult.energy}`);
+            logger.info(
+              `Energy recovered to ${recoveryResult.energy}/${maxEnergy}`
+            );
             await new Promise((resolve) => setTimeout(resolve, 1000));
             continue;
           } else {
@@ -732,10 +741,18 @@ class TsubasaAPI {
           }
         }
 
-        // Perform single tap
-        const tapResult = await this.callTapAPI(initData, 1, axiosInstance);
+        // Calculate maximum possible taps
+        const possibleTaps = Math.floor(currentEnergy / multiTapCount);
+
+        // Perform tap with all available energy
+        const tapResult = await this.callTapAPI(
+          initData,
+          possibleTaps,
+          axiosInstance
+        );
         if (!tapResult.success) {
           failedAttempts++;
+          logger.error(`Tap failed: ${tapResult.error}`);
           if (failedAttempts >= MAX_ATTEMPTS) {
             logger.error("Max tap attempts reached");
             break;
@@ -746,30 +763,63 @@ class TsubasaAPI {
 
         // Verify energy change
         const verifyResult = await this.callStartAPI(initData, axiosInstance);
-        if (!verifyResult.success || verifyResult.energy >= currentEnergy) {
-          logger.warn("Energy verification failed, retrying...");
+        if (!verifyResult.success) {
           failedAttempts++;
-          if (failedAttempts >= MAX_ATTEMPTS) {
-            break;
-          }
+          logger.warn("Failed to verify energy status");
+          if (failedAttempts >= MAX_ATTEMPTS) break;
+          continue;
+        }
+
+        // Calculate expected energy after tap
+        const expectedEnergy = currentEnergy - possibleTaps * multiTapCount;
+        const actualEnergy = verifyResult.energy;
+        const energyTolerance = multiTapCount; // Allow some tolerance in energy calculation
+
+        if (Math.abs(actualEnergy - expectedEnergy) > energyTolerance) {
+          logger.warn(
+            `Energy verification mismatch | ` +
+              `Expected: ${expectedEnergy} | ` +
+              `Actual: ${actualEnergy} | ` +
+              `Difference: ${Math.abs(actualEnergy - expectedEnergy)}`
+          );
+          failedAttempts++;
+          if (failedAttempts >= MAX_ATTEMPTS) break;
           await new Promise((resolve) => setTimeout(resolve, 1000));
           continue;
         }
 
         // Tap successful
-        totalTaps++;
+        totalTaps += possibleTaps;
         failedAttempts = 0;
 
+        // Format numbers for better readability
+        const formattedBalance = this.formatNumber(tapResult.total_coins);
+        const formattedTaps = this.formatNumber(possibleTaps);
+
         logger.info(
-          `Tap successful | Taps: ${totalTaps} | ` +
-            `Energy ${verifyResult.energy}/${maxEnergy} | ` +
-            `Balance: ${tapResult.total_coins}`
+          `Tap successful | ` +
+            `Count: ${formattedTaps} | ` +
+            `Energy: ${actualEnergy}/${maxEnergy} | ` +
+            `Balance: ${formattedBalance}`
         );
 
-        // Add delay between taps
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        // If energy is low, try recovery
+        if (actualEnergy < multiTapCount * 2) {
+          const recoveryResult = await this.callEnergyRecoveryAPI(
+            initData,
+            axiosInstance
+          );
+          if (recoveryResult.success) {
+            logger.info(
+              `Energy recovered to ${recoveryResult.energy}/${maxEnergy}`
+            );
+          }
+        }
+
+        // Add small delay between cycles
+        await new Promise((resolve) => setTimeout(resolve, 1500));
       } catch (error) {
-        logger.error(`Tap error: ${error.message}`);
+        logger.error(`Tap process error: ${error.message}`);
         failedAttempts++;
         if (failedAttempts >= MAX_ATTEMPTS) {
           break;
@@ -779,6 +829,11 @@ class TsubasaAPI {
     }
 
     return totalTaps;
+  }
+
+  // Helper untuk format angka
+  formatNumber(num) {
+    return new Intl.NumberFormat().format(num);
   }
 
   // Card-related methods - tambahkan ke dalam class TsubasaAPI

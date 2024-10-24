@@ -60,7 +60,7 @@ class TsubasaAPI {
     const question = (query) =>
       new Promise((resolve) => rl.question(query, resolve));
 
-    logger.info("Please configure the following settings:");
+    console.log("Please configure the following settings:");
 
     this.config = {
       enableCardUpgrades:
